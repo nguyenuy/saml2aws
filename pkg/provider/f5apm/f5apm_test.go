@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/versent/saml2aws/pkg/creds"
+	"github.com/versent/saml2aws/v2/pkg/creds"
 
-	"github.com/versent/saml2aws/pkg/provider"
+	"github.com/versent/saml2aws/v2/pkg/provider"
 
 	"github.com/stretchr/testify/require"
 )
@@ -22,13 +22,14 @@ func TestClient_getLoginForm(t *testing.T) {
 	require.Nil(t, err)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer ts.Close()
 
 	jar, err := cookiejar.New(nil)
 	require.Nil(t, err)
-	ac := Client{client: &provider.HTTPClient{Client: http.Client{Jar: jar}}}
+	opts := &provider.HTTPClientOptions{IsWithRetries: false}
+	ac := Client{client: &provider.HTTPClient{Client: http.Client{Jar: jar}, Options: opts}}
 	t.Log(ac)
 	loginDetails := &creds.LoginDetails{URL: ts.URL, Username: "groundcontrol", Password: "majortom"}
 	t.Log(loginDetails)
@@ -46,13 +47,14 @@ func TestClient_postLoginForm_user_pass(t *testing.T) {
 	require.Nil(t, err)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer ts.Close()
 
 	jar, err := cookiejar.New(nil)
 	require.Nil(t, err)
-	ac := Client{client: &provider.HTTPClient{Client: http.Client{Jar: jar}}}
+	opts := &provider.HTTPClientOptions{IsWithRetries: false}
+	ac := Client{client: &provider.HTTPClient{Client: http.Client{Jar: jar}, Options: opts}}
 	t.Log(ac)
 	loginDetails := &creds.LoginDetails{URL: ts.URL, Username: "groundcontrol", Password: "majortom"}
 	t.Log(loginDetails)

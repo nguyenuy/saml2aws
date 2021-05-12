@@ -30,7 +30,8 @@ const (
 
 // IDPAccount saml IDP account
 type IDPAccount struct {
-	AppID                string `ini:"app_id"` // used by OneLogin
+	Name                 string `ini:"name"`
+	AppID                string `ini:"app_id"` // used by OneLogin and AzureAD
 	URL                  string `ini:"url"`
 	Username             string `ini:"username"`
 	Provider             string `ini:"provider"`
@@ -43,6 +44,13 @@ type IDPAccount struct {
 	ResourceID           string `ini:"resource_id"` // used by F5APM
 	Subdomain            string `ini:"subdomain"`   // used by OneLogin
 	RoleARN              string `ini:"role_arn"`
+	Region               string `ini:"region"`
+	HttpAttemptsCount    string `ini:"http_attempts_count"`
+	HttpRetryDelay       string `ini:"http_retry_delay"`
+	CredentialsFile      string `ini:"credentials_file"`
+	SAMLCache            bool   `ini:"saml_cache"`
+	SAMLCacheFile        string `ini:"saml_cache_file"`
+	TargetURL            string `ini:"target_url"`
 }
 
 func (ia IDPAccount) String() string {
@@ -55,6 +63,9 @@ func (ia IDPAccount) String() string {
   Subdomain: %s`, ia.AppID, ia.Subdomain)
 	case "F5APM":
 		policyID = fmt.Sprintf("\n  ResourceID: %s", ia.ResourceID)
+	case "AzureAD":
+		appID = fmt.Sprintf(`
+  AppID: %s`, ia.AppID)
 	}
 
 	return fmt.Sprintf(`account {%s%s
@@ -67,7 +78,8 @@ func (ia IDPAccount) String() string {
   SessionDuration: %d
   Profile: %s
   RoleARN: %s
-}`, appID, policyID, ia.URL, ia.Username, ia.Provider, ia.MFA, ia.SkipVerify, ia.AmazonWebservicesURN, ia.SessionDuration, ia.Profile, ia.RoleARN)
+  Region: %s
+}`, appID, policyID, ia.URL, ia.Username, ia.Provider, ia.MFA, ia.SkipVerify, ia.AmazonWebservicesURN, ia.SessionDuration, ia.Profile, ia.RoleARN, ia.Region)
 }
 
 // Validate validate the required / expected fields are set
@@ -83,6 +95,10 @@ func (ia *IDPAccount) Validate() error {
 	case "F5APM":
 		if ia.ResourceID == "" {
 			return errors.New("Resource ID empty in idp account")
+		}
+	case "AzureAD":
+		if ia.AppID == "" {
+			return errors.New("app ID empty in idp account")
 		}
 	}
 
@@ -182,6 +198,9 @@ func (cm *ConfigManager) LoadIDPAccount(idpAccountName string) (*IDPAccount, err
 	if err != nil {
 		return nil, errors.Wrap(err, "Unable to read idp account")
 	}
+
+	// adding Name at Load time for the IdpAccount to have awareness of "self"
+	account.Name = idpAccountName
 
 	return account, nil
 }

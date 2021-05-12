@@ -2,28 +2,30 @@ package pingfed
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"time"
-	"encoding/base64"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
-	"github.com/versent/saml2aws/pkg/cfg"
-	"github.com/versent/saml2aws/pkg/creds"
-	"github.com/versent/saml2aws/pkg/page"
-	"github.com/versent/saml2aws/pkg/prompter"
-	"github.com/versent/saml2aws/pkg/provider"
+	"github.com/versent/saml2aws/v2/pkg/cfg"
+	"github.com/versent/saml2aws/v2/pkg/creds"
+	"github.com/versent/saml2aws/v2/pkg/page"
+	"github.com/versent/saml2aws/v2/pkg/prompter"
+	"github.com/versent/saml2aws/v2/pkg/provider"
 )
 
 var logger = logrus.WithField("provider", "pingfed")
 
 // Client wrapper around PingFed + PingId enabling authentication and retrieval of assertions
 type Client struct {
+	provider.ValidateBase
+
 	client     *provider.HTTPClient
 	idpAccount *cfg.IDPAccount
 }
@@ -33,7 +35,7 @@ func New(idpAccount *cfg.IDPAccount) (*Client, error) {
 
 	tr := provider.NewDefaultTransport(idpAccount.SkipVerify)
 
-	client, err := provider.NewHTTPClient(tr)
+	client, err := provider.NewHTTPClient(tr, provider.BuildHttpClientOpts(idpAccount))
 	if err != nil {
 		return nil, errors.Wrap(err, "error building http client")
 	}
@@ -52,8 +54,8 @@ type ctxKey string
 
 // Authenticate Authenticate to PingFed and return the data from the body of the SAML assertion.
 func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error) {
-	url := fmt.Sprintf("%s/idp/startSSO.ping?PartnerSpId=%s", loginDetails.URL, ac.idpAccount.AmazonWebservicesURN)
-	req, err := http.NewRequest("GET", url, nil)
+	u := fmt.Sprintf("%s/idp/startSSO.ping?PartnerSpId=%s", loginDetails.URL, ac.idpAccount.AmazonWebservicesURN)
+	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return "", errors.Wrap(err, "error building request")
 	}
@@ -66,15 +68,14 @@ func (ac *Client) follow(ctx context.Context, req *http.Request) (string, error)
 	if err != nil {
 		return "", errors.Wrap(err, "error following")
 	}
-
-	doc, err := goquery.NewDocumentFromResponse(res)
+	doc, err := goquery.NewDocumentFromReader(res.Body)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to build document from response")
 	}
 
 	var handler func(context.Context, *goquery.Document, *http.Response) (context.Context, *http.Request, error)
 
-	if docIsFormRedirectToAWS(doc) {
+	if docIsFormRedirectToTarget(doc, ac.idpAccount.TargetURL) {
 		logger.WithField("type", "saml-response-to-aws").Debug("doc detect")
 		if samlResponse, ok := extractSAMLResponse(doc); ok {
 			decodedSamlResponse, err := base64.StdEncoding.DecodeString(samlResponse)
@@ -142,6 +143,8 @@ func (ac *Client) handleLogin(ctx context.Context, doc *goquery.Document, res *h
 	if err != nil {
 		return ctx, nil, err
 	}
+	form.Values.Set("USER", loginDetails.Username)
+	form.Values.Set("PASSWORD", loginDetails.Password)
 
 	req, err := form.BuildRequest()
 	return ctx, req, err
@@ -229,11 +232,12 @@ func (ac *Client) handleFormRedirect(ctx context.Context, doc *goquery.Document,
 	return ctx, req, err
 }
 
-func (ac *Client) handleFormSamlRequest(ctx context.Context, doc *goquery.Document, _ *http.Response) (context.Context, *http.Request, error) {
+func (ac *Client) handleWebAuthn(ctx context.Context, doc *goquery.Document) (context.Context, *http.Request, error) {
 	form, err := page.NewFormFromDocument(doc, "")
 	if err != nil {
-		return ctx, nil, errors.Wrap(err, "error extracting samlrequest form")
+		return ctx, nil, errors.Wrap(err, "error extracting webauthn form")
 	}
+	form.Values.Set("isWebAuthnSupportedByBrowser", "false")
 	req, err := form.BuildRequest()
 	return ctx, req, err
 }
@@ -270,7 +274,7 @@ func (ac *Client) handleFormSelectDevice(ctx context.Context, doc *goquery.Docum
 }
 
 func docIsLogin(doc *goquery.Document) bool {
-	return doc.Has("input[name=\"pf.pass\"]").Size() == 1
+	return doc.Has("input[name=\"pf.pass\"]").Size() == 1 || doc.Has("input[name=\"PASSWORD\"]").Size() == 1
 }
 
 func docIsOTP(doc *goquery.Document) bool {
@@ -289,6 +293,10 @@ func docIsFormRedirect(doc *goquery.Document) bool {
 	return doc.Has("input[name=\"ppm_request\"]").Size() == 1 || doc.Find("form[action=\"https://authenticator.pingone.com/pingid/ppm/auth\"]").Size() == 1
 }
 
+func docIsWebAuthn(doc *goquery.Document) bool {
+	return doc.Has("input[name=\"isWebAuthnSupportedByBrowser\"]").Size() == 1
+}
+
 func docIsFormSamlRequest(doc *goquery.Document) bool {
 	return doc.Find("input[name=\"SAMLRequest\"]").Size() == 1
 }
@@ -297,8 +305,12 @@ func docIsFormResume(doc *goquery.Document) bool {
 	return doc.Find("input[name=\"RelayState\"]").Size() == 1 || doc.Find("input[name=\"Resume\"]").Size() == 1
 }
 
-func docIsFormRedirectToAWS(doc *goquery.Document) bool {
-	return doc.Find("form[action=\"https://signin.aws.amazon.com/saml\"]").Size() == 1
+func docIsFormRedirectToTarget(doc *goquery.Document, target string) bool {
+	if target == "" {
+		target = "https://signin.aws.amazon.com/saml"
+	}
+	urlForm := fmt.Sprintf("form[action=\"%s\"]", target)
+	return doc.Find(urlForm).Size() == 1
 }
 
 func docIsFormSelectDevice(doc *goquery.Document) bool {
